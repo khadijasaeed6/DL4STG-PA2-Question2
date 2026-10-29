@@ -1,0 +1,4 @@
+﻿data/MovingMNIST/mnist_test_seq.npy
+.venv/
+__pycache__/
+.ipynb_checkpoints/

@@ -1,0 +1,140 @@
+def train_model_a(seed, epochs=30, batch_size=32, learning_rate=1e-3):
+    # Set all random seeds for this run.
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+
+    run_device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    # Create a fresh model and optimizer for this seed.
+    model = ModelA().to(run_device)
+    optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
+
+    # Each dataset item is one complete video.
+    loader = DataLoader(
+        TensorDataset(train_videos),
+        batch_size=batch_size,
+        shuffle=True,
+        num_workers=0,
+        drop_last=False
+    )
+
+    # Save outputs separately for each seed.
+    output_dir = Path(f"model_a_seed_{seed}")
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    history = []
+    best_val_loss = float("inf")
+    epoch_times = []
+
+    for epoch in range(1, epochs + 1):
+        model.train()
+        epoch_start = time.time()
+        total_train_loss = 0.0
+        videos_seen = 0
+
+        for (videos_batch,) in loader:
+            videos_batch = videos_batch.to(run_device)
+
+            # Sample one 1x window per video in this batch.
+            starts = torch.randint(
+                low=1,
+                high=12,
+                size=(videos_batch.size(0),),
+                device="cpu"
+            ).tolist()
+
+            inputs = []
+            targets = []
+
+            for i, start in enumerate(starts):
+                X, Y = make_window(
+                    videos_batch[i],
+                    t=start,
+                    speed=1
+                )
+                inputs.append(X)
+                targets.append(Y)
+
+            X_batch = torch.stack(inputs).to(run_device)
+            Y_batch = torch.stack(targets).to(run_device)
+
+            optimizer.zero_grad(set_to_none=True)
+
+            predictions = model_a_rollout(model, X_batch)
+            loss = per_video_mse(predictions, Y_batch).mean()
+
+            loss.backward()
+            optimizer.step()
+
+            batch_count = videos_batch.size(0)
+            total_train_loss += loss.item() * batch_count
+            videos_seen += batch_count
+
+        epoch_time = time.time() - epoch_start
+        epoch_times.append(epoch_time)
+        train_loss = total_train_loss / videos_seen
+
+        # Validate on all validation videos, using 1x windows starting at t=1.
+        model.eval()
+        val_loss_sum = 0.0
+        val_count = 0
+
+        with torch.no_grad():
+            for start_idx in range(0, len(val_videos), batch_size):
+                batch = val_videos[start_idx:start_idx + batch_size]
+                batch = batch.to(run_device)
+
+                X_val = batch[:, :5]
+                Y_val = batch[:, 5:10]
+
+                predictions = model_a_rollout(model, X_val)
+                losses = per_video_mse(predictions, Y_val)
+
+                val_loss_sum += losses.sum().item()
+                val_count += batch.size(0)
+
+        val_loss = val_loss_sum / val_count
+
+        record = {
+            "epoch": epoch,
+            "train_loss": train_loss,
+            "val_loss": val_loss,
+            "epoch_time_seconds": epoch_time
+        }
+        history.append(record)
+
+        # Save the latest checkpoint every epoch.
+        torch.save(
+            {
+                "seed": seed,
+                "epoch": epoch,
+                "model_state_dict": model.state_dict(),
+                "optimizer_state_dict": optimizer.state_dict(),
+                "history": history
+            },
+            output_dir / "latest_checkpoint.pt"
+        )
+
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
+            torch.save(
+                model.state_dict(),
+                output_dir / "best_model.pt"
+            )
+
+        print(
+            f"Seed {seed} | Epoch {epoch:02d}/{epochs} | "
+            f"Train MSE: {train_loss:.6f} | "
+            f"Val MSE: {val_loss:.6f} | "
+            f"Time: {epoch_time / 60:.2f} min"
+        )
+
+    mean_epoch_time = float(np.mean(epoch_times))
+
+    print(f"\nSeed {seed} finished.")
+    print(f"Best validation MSE: {best_val_loss:.6f}")
+    print(f"Mean epoch time: {mean_epoch_time / 60:.2f} minutes")
+
+    return model, history
